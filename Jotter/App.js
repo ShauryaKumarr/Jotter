@@ -1,12 +1,12 @@
 import { StatusBar } from 'expo-status-bar';
-
-import { StyleSheet, View } from 'react-native';
+import { StyleSheet, View, Platform } from 'react-native';
 import GridCanvas from './GridCanvas';
+import WebCanvas from './WebCanvas';
 
 export default function App() {
   return (
     <View style={styles.container}>
-      <GridCanvas />
+      {Platform.OS === 'web' ? <WebCanvas /> : <GridCanvas />}
       <StatusBar style="auto" />
     </View>
   );

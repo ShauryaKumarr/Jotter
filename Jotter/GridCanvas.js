@@ -12,9 +12,9 @@ function drawGridLines() {
       <Path
         key={`v-${x}`}
         path={Skia.Path.Make().moveTo(x, 0).lineTo(x, height)}
-        color="#e0e0e0"
+        color="#f0f0f0"
         style="stroke"
-        strokeWidth={1}
+        strokeWidth={0.5}
       />
     );
   }
@@ -23,9 +23,9 @@ function drawGridLines() {
       <Path
         key={`h-${y}`}
         path={Skia.Path.Make().moveTo(0, y).lineTo(width, y)}
-        color="#e0e0e0"
+        color="#f0f0f0"
         style="stroke"
-        strokeWidth={1}
+        strokeWidth={0.5}
       />
     );
   }
@@ -34,27 +34,29 @@ function drawGridLines() {
 
 export default function GridCanvas() {
   const [paths, setPaths] = useState([]);
-  const currentPath = useRef(null);
+  const [currentPath, setCurrentPath] = useState(null);
 
   const panResponder = useRef(
     PanResponder.create({
       onStartShouldSetPanResponder: () => true,
       onPanResponderGrant: (evt, gestureState) => {
         const { locationX, locationY } = evt.nativeEvent;
-        currentPath.current = Skia.Path.Make();
-        currentPath.current.moveTo(locationX, locationY);
+        const newPath = Skia.Path.Make();
+        newPath.moveTo(locationX, locationY);
+        setCurrentPath(newPath);
       },
       onPanResponderMove: (evt, gestureState) => {
         const { locationX, locationY } = evt.nativeEvent;
-        if (currentPath.current) {
-          currentPath.current.lineTo(locationX, locationY);
-          setPaths((prev) => [...prev.slice(0, -1), currentPath.current.copy()]);
+        if (currentPath) {
+          const updatedPath = currentPath.copy();
+          updatedPath.lineTo(locationX, locationY);
+          setCurrentPath(updatedPath);
         }
       },
       onPanResponderRelease: () => {
-        if (currentPath.current) {
-          setPaths((prev) => [...prev, currentPath.current.copy()]);
-          currentPath.current = null;
+        if (currentPath) {
+          setPaths((prev) => [...prev, currentPath]);
+          setCurrentPath(null);
         }
       },
     })
@@ -64,9 +66,12 @@ export default function GridCanvas() {
     <View style={StyleSheet.absoluteFill} {...panResponder.panHandlers}>
       <Canvas style={StyleSheet.absoluteFill}>
         {drawGridLines()}
-        {paths.map((p, i) => (
-          <Path key={i} path={p} color="#222" style="stroke" strokeWidth={3} />
+        {paths.map((path, i) => (
+          <Path key={i} path={path} color="#000000" style="stroke" strokeWidth={2} />
         ))}
+        {currentPath && (
+          <Path path={currentPath} color="#000000" style="stroke" strokeWidth={2} />
+        )}
       </Canvas>
     </View>
   );
