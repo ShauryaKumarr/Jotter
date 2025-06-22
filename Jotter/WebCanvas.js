@@ -7,6 +7,15 @@ const { width, height } = Dimensions.get('window');
 const GRID_SIZE = 40;
 const THRESHOLD = 10; // pixels
 
+// Helper to extract vertices from an OpenCV Mat
+const getVertices = (approx) => {
+  const vertices = [];
+  for (let i = 0; i < approx.rows; ++i) {
+    vertices.push({ x: approx.data32S[i * 2], y: approx.data32S[i * 2 + 1] });
+  }
+  return vertices;
+};
+
 // OpenCV.js shape detection functions
 const canvasToMat = (canvas) => {
   const ctx = canvas.getContext('2d');
@@ -19,38 +28,35 @@ const canvasToMat = (canvas) => {
 
 const classifyShape = (contour) => {
   const perimeter = cv.arcLength(contour, true);
-  const epsilon = 0.02 * perimeter;
   const approx = new cv.Mat();
-  cv.approxPolyDP(contour, approx, epsilon, true);
-  
-  const vertices = approx.rows;
+  cv.approxPolyDP(contour, approx, 0.02 * perimeter, true);
+
+  const verticesCount = approx.rows;
   const area = cv.contourArea(contour);
-  
-  // Get bounding rectangle for aspect ratio
   const boundingRect = cv.boundingRect(contour);
-  const aspectRatio = boundingRect.width / boundingRect.height;
-  
-  let shape = 'unknown';
-  
-  if (vertices === 3) {
-    shape = 'triangle';
-  } else if (vertices === 4) {
-    // Check if it's roughly square or rectangle
-    if (aspectRatio > 0.8 && aspectRatio < 1.2) {
-      shape = 'square';
-    } else {
-      shape = 'rectangle';
-    }
-  } else if (vertices > 8) {
-    // Check circularity
-    const circularity = 4 * Math.PI * area / (perimeter * perimeter);
-    if (circularity > 0.8) {
-      shape = 'circle';
+
+  let shape = { type: 'unknown' };
+
+  if (verticesCount === 3) {
+    shape.type = 'triangle';
+    shape.vertices = getVertices(approx);
+  } else if (verticesCount === 4) {
+    shape.type = 'rectangle';
+    shape.vertices = getVertices(approx);
+    shape.boundingRect = boundingRect;
+  } else {
+    // Check for circle
+    const circularity = (4 * Math.PI * area) / (perimeter * perimeter);
+    if (circularity > 0.85) { // Stricter circularity check
+      shape.type = 'circle';
+      const circle = cv.minEnclosingCircle(contour);
+      shape.center = circle.center;
+      shape.radius = circle.radius;
     }
   }
-  
+
   approx.delete();
-  return { type: shape, contour: contour, boundingRect };
+  return shape;
 };
 
 const detectShapes = (canvas) => {
@@ -80,6 +86,7 @@ const detectShapes = (canvas) => {
       if (shape.type !== 'unknown') {
         shapes.push(shape);
       }
+      contour.delete(); // Clean up individual contours
     }
     
     // 6. Clean up memory
@@ -252,10 +259,14 @@ export default function WebCanvas() {
   };
 
   const detectShape = (stroke) => {
-    console.log('=== Shape Detection Debug ===');
-    console.log('Stroke length:', stroke.length);
-    console.log('OpenCV loaded:', opencvLoaded);
-    
+    console.log('=== Shape Detection Started ===');
+
+    // First, check for a line using the reliable heuristic, as findContours works on closed shapes
+    if (isLine(stroke)) {
+      console.log('✅ Heuristic detected: LINE');
+      return { type: 'line', stroke: stroke };
+    }
+
     if (!opencvLoaded) {
       console.log('OpenCV not loaded, using fallback heuristics');
       return detectShapeFallback(stroke);
@@ -287,12 +298,12 @@ export default function WebCanvas() {
       console.log('OpenCV detected shapes:', shapes);
       
       if (shapes.length > 0) {
-        const detectedShape = shapes[0].type;
-        console.log('✅ OpenCV detected:', detectedShape.toUpperCase());
+        const detectedShape = shapes[0];
+        console.log('✅ OpenCV detected:', detectedShape.type.toUpperCase(), detectedShape);
         return detectedShape;
       } else {
         console.log('❌ OpenCV detected: FREEHAND');
-        return 'freehand';
+        return { type: 'freehand' };
       }
     } catch (error) {
       console.error('OpenCV detection failed, falling back to heuristics:', error);
@@ -302,27 +313,23 @@ export default function WebCanvas() {
 
   const detectShapeFallback = (stroke) => {
     // Fallback to original heuristic detection
-    if (isLine(stroke)) {
-      console.log('✅ Fallback detected: LINE');
-      return 'line';
+    if (isRectangle(stroke)) {
+      console.log('✅ Fallback detected: RECTANGLE');
+      return { type: 'rectangle', boundingRect: getBoundingBox(stroke) };
     }
     if (isCircle(stroke)) {
       console.log('✅ Fallback detected: CIRCLE');
-      return 'circle';
-    }
-    if (isRectangle(stroke)) {
-      console.log('✅ Fallback detected: RECTANGLE');
-      return 'rectangle';
+      const center = calculateCenter(stroke);
+      const radius = average(stroke.map(point => distance(center, point)));
+      return { type: 'circle', center, radius };
     }
     
     console.log('❌ Fallback detected: FREEHAND');
-    return 'freehand';
+    return { type: 'freehand' };
   };
 
-  const drawRecognizedShape = (shape, stroke) => {
+  const drawRecognizedShape = (newShape) => {
     const ctx = context;
-    ctx.strokeStyle = '#ff0000'; // Red for recognized shapes
-    ctx.lineWidth = 3;
     
     // Clear the rough drawing before drawing the clean shape
     ctx.clearRect(0, 0, width, height);
@@ -330,56 +337,50 @@ export default function WebCanvas() {
 
     // Redraw all previously recognized shapes
     recognizedShapes.forEach(s => {
-      drawCleanShape(s.type, s.stroke);
+      drawCleanShape(s);
     });
 
     // Draw the newly recognized shape
-    drawCleanShape(shape, stroke);
+    drawCleanShape(newShape);
   };
 
-  const drawCleanShape = (shape, stroke) => {
+  const drawCleanShape = (shape) => {
     const ctx = context;
     ctx.strokeStyle = '#ff0000';
     ctx.lineWidth = 3;
+    ctx.beginPath();
 
-    switch (shape) {
+    switch (shape.type) {
       case 'line':
-        ctx.beginPath();
-        ctx.moveTo(stroke[0].x, stroke[0].y);
-        ctx.lineTo(stroke[stroke.length - 1].x, stroke[stroke.length - 1].y);
-        ctx.stroke();
+        // Lines are detected by heuristics and use the raw stroke
+        ctx.moveTo(shape.stroke[0].x, shape.stroke[0].y);
+        ctx.lineTo(shape.stroke[shape.stroke.length - 1].x, shape.stroke[shape.stroke.length - 1].y);
         break;
       case 'rectangle':
       case 'square':
-        const bounds = getBoundingBox(stroke);
-        ctx.strokeRect(bounds.minX, bounds.minY, bounds.width, bounds.height);
+         // Use the precise vertices from OpenCV for perfect (even rotated) rectangles
+        ctx.moveTo(shape.vertices[0].x, shape.vertices[0].y);
+        for (let i = 1; i < shape.vertices.length; i++) {
+          ctx.lineTo(shape.vertices[i].x, shape.vertices[i].y);
+        }
+        ctx.closePath();
         break;
       case 'circle':
-        const center = calculateCenter(stroke);
-        const radius = average(stroke.map(point => distance(center, point)));
-        ctx.beginPath();
-        ctx.arc(center.x, center.y, radius, 0, 2 * Math.PI);
-        ctx.stroke();
+        // Use the precise center and radius from OpenCV
+        ctx.arc(shape.center.x, shape.center.y, shape.radius, 0, 2 * Math.PI);
         break;
       case 'triangle':
-        // This uses the original stroke points which can be imprecise.
-        // For a more perfect triangle, we would use the vertices from OpenCV's contour approximation.
-        const tempCanvas = document.createElement('canvas');
-        const tempCtx = tempCanvas.getContext('2d');
-        const mat = cv.matFromImageData(tempCtx.getImageData(0,0,1,1)); // dummy mat
-        const contours = new cv.MatVector();
-        const hierarchy = new cv.Mat();
-        // This part is complex, for now we draw a simple triangle from the stroke
-        ctx.beginPath();
-        ctx.moveTo(stroke[0].x, stroke[0].y);
-        ctx.lineTo(stroke[Math.floor(stroke.length/2)].x, stroke[Math.floor(stroke.length/2)].y);
-        ctx.lineTo(stroke[stroke.length-1].x, stroke[stroke.length-1].y);
+        // Use the precise vertices from OpenCV
+        ctx.moveTo(shape.vertices[0].x, shape.vertices[0].y);
+        for (let i = 1; i < shape.vertices.length; i++) {
+          ctx.lineTo(shape.vertices[i].x, shape.vertices[i].y);
+        }
         ctx.closePath();
-        ctx.stroke();
-        mat.delete(); contours.delete(); hierarchy.delete();
         break;
     }
     
+    ctx.stroke();
+
     // Reset stroke style for next drawing
     ctx.strokeStyle = '#000000';
     ctx.lineWidth = 2;
@@ -404,12 +405,12 @@ export default function WebCanvas() {
   const handleMouseUp = () => {
     if (isDrawing && currentStroke.length > 1) {
       const detectedShape = detectShape(currentStroke);
-      console.log('Detected shape:', detectedShape);
+      console.log('Detected shape object:', detectedShape);
       
-      if (detectedShape !== 'freehand') {
+      if (detectedShape.type !== 'freehand') {
         // The drawRecognizedShape function will now handle clearing and redrawing
-        drawRecognizedShape(detectedShape, currentStroke);
-        setRecognizedShapes(prev => [...prev, { type: detectedShape, stroke: currentStroke }]);
+        drawRecognizedShape(detectedShape);
+        setRecognizedShapes(prev => [...prev, detectedShape]);
       }
     }
     setIsDrawing(false);
