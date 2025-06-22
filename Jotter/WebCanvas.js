@@ -7,7 +7,96 @@ const { width, height } = Dimensions.get('window');
 const GRID_SIZE = 40;
 const THRESHOLD = 10; // pixels
 
-// Helper functions for shape detection
+// OpenCV.js shape detection functions
+const canvasToMat = (canvas) => {
+  const ctx = canvas.getContext('2d');
+  const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+  
+  // Create OpenCV Mat from image data
+  const mat = cv.matFromImageData(imageData);
+  return mat;
+};
+
+const classifyShape = (contour) => {
+  const perimeter = cv.arcLength(contour, true);
+  const epsilon = 0.02 * perimeter;
+  const approx = new cv.Mat();
+  cv.approxPolyDP(contour, approx, epsilon, true);
+  
+  const vertices = approx.rows;
+  const area = cv.contourArea(contour);
+  
+  // Get bounding rectangle for aspect ratio
+  const boundingRect = cv.boundingRect(contour);
+  const aspectRatio = boundingRect.width / boundingRect.height;
+  
+  let shape = 'unknown';
+  
+  if (vertices === 3) {
+    shape = 'triangle';
+  } else if (vertices === 4) {
+    // Check if it's roughly square or rectangle
+    if (aspectRatio > 0.8 && aspectRatio < 1.2) {
+      shape = 'square';
+    } else {
+      shape = 'rectangle';
+    }
+  } else if (vertices > 8) {
+    // Check circularity
+    const circularity = 4 * Math.PI * area / (perimeter * perimeter);
+    if (circularity > 0.8) {
+      shape = 'circle';
+    }
+  }
+  
+  approx.delete();
+  return { type: shape, contour: contour, boundingRect };
+};
+
+const detectShapes = (canvas) => {
+  try {
+    // 1. Convert canvas to OpenCV Mat
+    const src = canvasToMat(canvas);
+    
+    // 2. Convert to grayscale
+    const gray = new cv.Mat();
+    cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
+    
+    // 3. Apply threshold to get binary image
+    const binary = new cv.Mat();
+    cv.threshold(gray, binary, 0, 255, cv.THRESH_BINARY_INV | cv.THRESH_OTSU);
+    
+    // 4. Find contours
+    const contours = new cv.MatVector();
+    const hierarchy = new cv.Mat();
+    cv.findContours(binary, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+    
+    console.log('OpenCV contours found:', contours.size());
+    // 5. Analyze each contour
+    const shapes = [];
+    for (let i = 0; i < contours.size(); i++) {
+      const contour = contours.get(i);
+      const shape = classifyShape(contour);
+      if (shape.type !== 'unknown') {
+        shapes.push(shape);
+      }
+    }
+    
+    // 6. Clean up memory
+    src.delete();
+    gray.delete();
+    binary.delete();
+    contours.delete();
+    hierarchy.delete();
+    
+    return shapes;
+  } catch (error) {
+    console.error('OpenCV shape detection error:', error);
+    return [];
+  }
+};
+
+// Legacy helper functions (keeping for fallback)
 const distance = (point1, point2) => {
   return Math.sqrt(Math.pow(point2.x - point1.x, 2) + Math.pow(point2.y - point1.y, 2));
 };
@@ -39,46 +128,11 @@ const calculateCenter = (stroke) => {
   return { x: sumX / stroke.length, y: sumY / stroke.length };
 };
 
-const calculateVariance = (values) => {
-  const mean = values.reduce((sum, val) => sum + val, 0) / values.length;
-  const squaredDiffs = values.map(val => Math.pow(val - mean, 2));
-  return squaredDiffs.reduce((sum, val) => sum + val, 0) / values.length;
-};
-
 const average = (values) => {
   return values.reduce((sum, val) => sum + val, 0) / values.length;
 };
 
-const findCorners = (stroke) => {
-  // Simple corner detection - find points with significant direction change
-  const corners = [];
-  console.log('🔍 Finding corners in stroke of length:', stroke.length);
-  
-  for (let i = 1; i < stroke.length - 1; i++) {
-    const prev = stroke[i-1];
-    const curr = stroke[i];
-    const next = stroke[i+1];
-    
-    const angle1 = Math.atan2(curr.y - prev.y, curr.x - prev.x);
-    const angle2 = Math.atan2(next.y - curr.y, next.x - curr.x);
-    const angleDiff = Math.abs(angle1 - angle2);
-    
-    // More lenient corner detection - 30 degrees instead of 45
-    if (angleDiff > Math.PI / 6) { // 30 degrees
-      corners.push(curr);
-    }
-  }
-  
-  console.log('🔲 Found corners:', corners.length);
-  return corners;
-};
-
-const isTriangle = (stroke) => {
-  const corners = findCorners(stroke);
-  return corners.length >= 3;
-};
-
-// Shape detection functions
+// Fallback heuristic detection (if OpenCV fails)
 const isLine = (stroke) => {
   if (stroke.length < 2) return false;
   
@@ -92,106 +146,38 @@ const isLine = (stroke) => {
 };
 
 const isRectangle = (stroke) => {
-  console.log('🔍 Rectangle detection starting...');
+  if (stroke.length < 4) return false;
   
-  if (stroke.length < 4) {
-    console.log('❌ Too few points:', stroke.length);
-    return false;
-  }
-  
-  // Check if stroke is closed (starts and ends near each other)
   const startEndDistance = distance(stroke[0], stroke[stroke.length-1]);
   const isClosed = startEndDistance < THRESHOLD;
-  console.log('📏 Start-end distance:', startEndDistance, 'Is closed:', isClosed);
   
-  if (!isClosed) {
-    console.log('❌ Shape is not closed');
-    return false;
-  }
+  if (!isClosed) return false;
   
   const bounds = getBoundingBox(stroke);
   const aspectRatio = bounds.width / bounds.height;
-  console.log('📐 Bounds:', bounds, 'Aspect ratio:', aspectRatio);
   
-  // Count significant corners (direction changes)
-  const corners = findCorners(stroke);
-  console.log('🔲 Corners found:', corners.length);
-  
-  // Very lenient rectangle detection
-  const hasCorners = corners.length >= 2; // Just need some corners
-  const reasonableAspectRatio = aspectRatio > 0.2 && aspectRatio < 5.0; // Very lenient
-  
-  console.log('✅ Rectangle checks:', { hasCorners, reasonableAspectRatio });
-  
-  const result = isClosed && hasCorners && reasonableAspectRatio;
-  console.log('🎯 Rectangle result:', result);
-  return result;
+  return isClosed && aspectRatio > 0.2 && aspectRatio < 5.0;
 };
 
 const isCircle = (stroke) => {
-  console.log('🔍 Circle detection starting...');
+  if (stroke.length < 6) return false;
   
-  if (stroke.length < 6) {
-    console.log('❌ Too few points:', stroke.length);
-    return false;
-  }
-  
-  // Check if stroke is closed
   const startEndDistance = distance(stroke[0], stroke[stroke.length-1]);
   const isClosed = startEndDistance < THRESHOLD;
-  console.log('📏 Start-end distance:', startEndDistance, 'Is closed:', isClosed);
   
-  if (!isClosed) {
-    console.log('❌ Shape is not closed');
-    return false;
-  }
+  if (!isClosed) return false;
   
   const center = calculateCenter(stroke);
   const distances = stroke.map(point => distance(center, point));
   const averageRadius = average(distances);
   
-  if (averageRadius === 0) {
-    console.log('❌ Zero radius');
-    return false;
-  }
+  if (averageRadius === 0) return false;
   
-  // Calculate variance in radius
-  const variance = calculateVariance(distances);
-  const circularity = variance / averageRadius;
-  
-  // Check aspect ratio - circles should be roughly square in their bounding box
   const bounds = getBoundingBox(stroke);
   const aspectRatio = bounds.width / bounds.height;
-  const isRoughlySquare = aspectRatio > 0.5 && aspectRatio < 2.0; // More lenient
+  const isRoughlySquare = aspectRatio > 0.5 && aspectRatio < 2.0;
   
-  // Very lenient circularity check
-  const isCircular = circularity < 0.5; // 50% tolerance - very lenient
-  
-  console.log('📊 Circle metrics:', { 
-    circularity, 
-    aspectRatio, 
-    isCircular, 
-    isRoughlySquare,
-    averageRadius,
-    variance
-  });
-  
-  const result = isClosed && isCircular && isRoughlySquare;
-  console.log('🎯 Circle result:', result);
-  return result;
-};
-
-const isArrow = (stroke) => {
-  if (stroke.length < 6) return false;
-  
-  const shaftEnd = Math.floor(stroke.length * 0.7);
-  const shaft = stroke.slice(0, shaftEnd);
-  const head = stroke.slice(shaftEnd);
-  
-  const shaftIsLine = isLine(shaft);
-  const headIsTriangle = isTriangle(head);
-  
-  return shaftIsLine && headIsTriangle;
+  return isClosed && isRoughlySquare;
 };
 
 export default function WebCanvas() {
@@ -200,8 +186,23 @@ export default function WebCanvas() {
   const [context, setContext] = useState(null);
   const [currentStroke, setCurrentStroke] = useState([]);
   const [recognizedShapes, setRecognizedShapes] = useState([]);
+  const [opencvLoaded, setOpencvLoaded] = useState(false);
 
   useEffect(() => {
+    // Load OpenCV.js dynamically
+    const script = document.createElement('script');
+    script.src = 'https://docs.opencv.org/4.8.0/opencv.js';
+    script.async = true;
+    script.onload = () => {
+      console.log('OpenCV.js loaded successfully');
+      setOpencvLoaded(true);
+    };
+    script.onerror = () => {
+      console.error('Failed to load OpenCV.js');
+    };
+    document.head.appendChild(script);
+
+    // Initialize canvas context
     const canvas = canvasRef.current;
     if (canvas) {
       const ctx = canvas.getContext('2d');
@@ -253,26 +254,68 @@ export default function WebCanvas() {
   const detectShape = (stroke) => {
     console.log('=== Shape Detection Debug ===');
     console.log('Stroke length:', stroke.length);
-    console.log('Stroke points:', stroke.slice(0, 3), '...', stroke.slice(-3));
+    console.log('OpenCV loaded:', opencvLoaded);
     
+    if (!opencvLoaded) {
+      console.log('OpenCV not loaded, using fallback heuristics');
+      return detectShapeFallback(stroke);
+    }
+    
+    try {
+      // Create temporary canvas for OpenCV analysis
+      const tempCanvas = document.createElement('canvas');
+      tempCanvas.width = width;
+      tempCanvas.height = height;
+      const tempCtx = tempCanvas.getContext('2d');
+      
+      // Fill background with white for clean analysis
+      tempCtx.fillStyle = '#ffffff';
+      tempCtx.fillRect(0, 0, tempCanvas.width, tempCanvas.height);
+      
+      // Draw the stroke on temp canvas
+      tempCtx.strokeStyle = '#000000';
+      tempCtx.lineWidth = 2;
+      tempCtx.beginPath();
+      tempCtx.moveTo(stroke[0].x, stroke[0].y);
+      for (let i = 1; i < stroke.length; i++) {
+        tempCtx.lineTo(stroke[i].x, stroke[i].y);
+      }
+      tempCtx.stroke();
+      
+      // Use OpenCV to detect shapes
+      const shapes = detectShapes(tempCanvas);
+      console.log('OpenCV detected shapes:', shapes);
+      
+      if (shapes.length > 0) {
+        const detectedShape = shapes[0].type;
+        console.log('✅ OpenCV detected:', detectedShape.toUpperCase());
+        return detectedShape;
+      } else {
+        console.log('❌ OpenCV detected: FREEHAND');
+        return 'freehand';
+      }
+    } catch (error) {
+      console.error('OpenCV detection failed, falling back to heuristics:', error);
+      return detectShapeFallback(stroke);
+    }
+  };
+
+  const detectShapeFallback = (stroke) => {
+    // Fallback to original heuristic detection
     if (isLine(stroke)) {
-      console.log('✅ Detected: LINE');
+      console.log('✅ Fallback detected: LINE');
       return 'line';
     }
     if (isCircle(stroke)) {
-      console.log('✅ Detected: CIRCLE');
+      console.log('✅ Fallback detected: CIRCLE');
       return 'circle';
     }
     if (isRectangle(stroke)) {
-      console.log('✅ Detected: RECTANGLE');
+      console.log('✅ Fallback detected: RECTANGLE');
       return 'rectangle';
     }
-    if (isArrow(stroke)) {
-      console.log('✅ Detected: ARROW');
-      return 'arrow';
-    }
     
-    console.log('❌ Detected: FREEHAND');
+    console.log('❌ Fallback detected: FREEHAND');
     return 'freehand';
   };
 
@@ -281,14 +324,33 @@ export default function WebCanvas() {
     ctx.strokeStyle = '#ff0000'; // Red for recognized shapes
     ctx.lineWidth = 3;
     
+    // Clear the rough drawing before drawing the clean shape
+    ctx.clearRect(0, 0, width, height);
+    drawGrid(ctx);
+
+    // Redraw all previously recognized shapes
+    recognizedShapes.forEach(s => {
+      drawCleanShape(s.type, s.stroke);
+    });
+
+    // Draw the newly recognized shape
+    drawCleanShape(shape, stroke);
+  };
+
+  const drawCleanShape = (shape, stroke) => {
+    const ctx = context;
+    ctx.strokeStyle = '#ff0000';
+    ctx.lineWidth = 3;
+
     switch (shape) {
       case 'line':
         ctx.beginPath();
         ctx.moveTo(stroke[0].x, stroke[0].y);
-        ctx.lineTo(stroke[stroke.length-1].x, stroke[stroke.length-1].y);
+        ctx.lineTo(stroke[stroke.length - 1].x, stroke[stroke.length - 1].y);
         ctx.stroke();
         break;
       case 'rectangle':
+      case 'square':
         const bounds = getBoundingBox(stroke);
         ctx.strokeRect(bounds.minX, bounds.minY, bounds.width, bounds.height);
         break;
@@ -299,27 +361,29 @@ export default function WebCanvas() {
         ctx.arc(center.x, center.y, radius, 0, 2 * Math.PI);
         ctx.stroke();
         break;
-      case 'arrow':
-        // Draw the shaft
-        const shaftEnd = Math.floor(stroke.length * 0.7);
+      case 'triangle':
+        // This uses the original stroke points which can be imprecise.
+        // For a more perfect triangle, we would use the vertices from OpenCV's contour approximation.
+        const tempCanvas = document.createElement('canvas');
+        const tempCtx = tempCanvas.getContext('2d');
+        const mat = cv.matFromImageData(tempCtx.getImageData(0,0,1,1)); // dummy mat
+        const contours = new cv.MatVector();
+        const hierarchy = new cv.Mat();
+        // This part is complex, for now we draw a simple triangle from the stroke
         ctx.beginPath();
         ctx.moveTo(stroke[0].x, stroke[0].y);
-        ctx.lineTo(stroke[shaftEnd].x, stroke[shaftEnd].y);
-        ctx.stroke();
-        // Draw the head (simplified triangle)
-        ctx.beginPath();
-        ctx.moveTo(stroke[shaftEnd].x, stroke[shaftEnd].y);
+        ctx.lineTo(stroke[Math.floor(stroke.length/2)].x, stroke[Math.floor(stroke.length/2)].y);
         ctx.lineTo(stroke[stroke.length-1].x, stroke[stroke.length-1].y);
-        ctx.lineTo(stroke[shaftEnd].x - 10, stroke[shaftEnd].y);
         ctx.closePath();
         ctx.stroke();
+        mat.delete(); contours.delete(); hierarchy.delete();
         break;
     }
     
-    // Reset stroke style
+    // Reset stroke style for next drawing
     ctx.strokeStyle = '#000000';
     ctx.lineWidth = 2;
-  };
+  }
 
   const handleMouseDown = (e) => {
     setIsDrawing(true);
@@ -340,9 +404,10 @@ export default function WebCanvas() {
   const handleMouseUp = () => {
     if (isDrawing && currentStroke.length > 1) {
       const detectedShape = detectShape(currentStroke);
-      console.log('Detected shape:', detectedShape); // Debug log
+      console.log('Detected shape:', detectedShape);
       
       if (detectedShape !== 'freehand') {
+        // The drawRecognizedShape function will now handle clearing and redrawing
         drawRecognizedShape(detectedShape, currentStroke);
         setRecognizedShapes(prev => [...prev, { type: detectedShape, stroke: currentStroke }]);
       }
@@ -368,6 +433,19 @@ export default function WebCanvas() {
         onMouseUp={handleMouseUp}
         onMouseLeave={handleMouseLeave}
       />
+      {!opencvLoaded && (
+        <div style={{
+          position: 'absolute',
+          top: 10,
+          left: 10,
+          background: '#ffeb3b',
+          padding: '5px 10px',
+          borderRadius: '4px',
+          fontSize: '12px'
+        }}>
+          Loading OpenCV.js...
+        </div>
+      )}
     </View>
   );
 }
